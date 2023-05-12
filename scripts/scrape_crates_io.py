@@ -14,7 +14,7 @@ import urllib3
 
 CRATES_IO_INDEX_GIT_LOC = "https://github.com/rust-lang/crates.io-index.git"
 RE_REGEX = re.compile(r"Regex::new\((r?\".*?\")\)")
-KNOWN_UNMAINTAINED_CRATES = set(["queryst-prime", "oozz"])
+KNOWN_UNMAINTAINED_CRATES = {"queryst-prime", "oozz"}
 
 # if only requests was in the standard library...
 urllib3.disable_warnings()
@@ -44,41 +44,39 @@ PRELUDE = """
 
 def main():
     args = argparser().parse_args()
-    out = open(os.path.abspath(args.output_file), "w")
-    out.write(PRELUDE.format(date=str(datetime.datetime.now())))
-    if args.crates_index:
-        args.crates_index = os.path.abspath(args.crates_index)
+    with open(os.path.abspath(args.output_file), "w") as out:
+        out.write(PRELUDE.format(date=str(datetime.datetime.now())))
+        if args.crates_index:
+            args.crates_index = os.path.abspath(args.crates_index)
 
-    # enter our scratch directory
-    old_dir = os.getcwd()
-    work_dir = tempfile.mkdtemp(prefix="scrape-crates-io")
-    os.chdir(work_dir)
+        # enter our scratch directory
+        old_dir = os.getcwd()
+        work_dir = tempfile.mkdtemp(prefix="scrape-crates-io")
+        os.chdir(work_dir)
 
-    crates_index = (args.crates_index
-                    if os.path.join(old_dir, args.crates_index)
-                    else download_crates_index())
+        crates_index = (args.crates_index
+                        if os.path.join(old_dir, args.crates_index)
+                        else download_crates_index())
 
-    for (name, vers) in iter_crates(crates_index):
-        if name in KNOWN_UNMAINTAINED_CRATES:
-            continue
+        for (name, vers) in iter_crates(crates_index):
+            if name in KNOWN_UNMAINTAINED_CRATES:
+                continue
 
-        with Crate(work_dir, name, vers) as c:
-            i = 0
-            for line in c.iter_lines():
-                for r in RE_REGEX.findall(line):
-                    print((name, vers, r))
-                    if len(r) >= 2 and r[-2] == "\\":
-                        continue
-                    out.write("// {}-{}: {}\n".format(name, vers, r))
-                    out.write("consistent!({}_{}, {});\n\n".format(
-                                name.replace("-", "_"), i, r))
-                    out.flush()
-                    i += 1
+            with Crate(work_dir, name, vers) as c:
+                i = 0
+                for line in c.iter_lines():
+                    for r in RE_REGEX.findall(line):
+                        print((name, vers, r))
+                        if len(r) >= 2 and r[-2] == "\\":
+                            continue
+                        out.write(f"// {name}-{vers}: {r}\n")
+                        out.write(f'consistent!({name.replace("-", "_")}_{i}, {r});\n\n')
+                        out.flush()
+                        i += 1
 
-    # Leave the scratch directory
-    os.chdir(old_dir)
-    shutil.rmtree(work_dir)
-    out.close()
+        # Leave the scratch directory
+        os.chdir(old_dir)
+        shutil.rmtree(work_dir)
 
 
 def download_crates_index():
@@ -89,14 +87,14 @@ def download_crates_index():
 
 
 def iter_crates(crates_index):
-    exclude = set(["config.json", ".git"])
+    exclude = {"config.json", ".git"}
     for crate_index_file in iter_files(crates_index, exclude=exclude):
         with open(crate_index_file) as f:
             most_recent = list(f)
-            most_recent = most_recent[len(most_recent) - 1]
+            most_recent = most_recent[-1]
 
             crate_info = json.loads(most_recent)
-            if "regex" not in set(d["name"] for d in crate_info["deps"]):
+            if "regex" not in {d["name"] for d in crate_info["deps"]}:
                 continue
 
             if crate_info["yanked"]:
@@ -109,12 +107,11 @@ def iter_files(d, exclude=set()):
         if x in exclude:
             continue
 
-        fullfp = os.path.abspath(d + "/" + x)
+        fullfp = os.path.abspath(f"{d}/{x}")
         if os.path.isfile(fullfp):
             yield fullfp
         elif os.path.isdir(fullfp):
-            for f in iter_files(fullfp, exclude):
-                yield f
+            yield from iter_files(fullfp, exclude)
 
 
 class Crate(object):
@@ -123,8 +120,7 @@ class Crate(object):
         self.version = version
         self.url = ("https://crates.io/api/v1/crates/{name}/{version}/download"
                     .format(name=self.name, version=self.version))
-        self.filename = "{}/{}-{}.tar.gz".format(
-                            work_dir, self.name, self.version)
+        self.filename = f"{work_dir}/{self.name}-{self.version}.tar.gz"
 
     def __enter__(self):
         max_retries = 1
@@ -134,14 +130,13 @@ class Crate(object):
 
             r = http.request("GET", self.url, preload_content=False)
             try:
-                print("[{}/{}] Downloading {}".format(
-                        retries, max_retries + 1, self.url))
+                print(f"[{retries}/{max_retries + 1}] Downloading {self.url}")
                 with open(self.filename, "wb") as f:
                     while True:
-                        data = r.read(1024)
-                        if not data:
+                        if data := r.read(1024):
+                            f.write(data)
+                        else:
                             break
-                        f.write(data)
             except Exception:
                 time.sleep(1)
                 r.release_conn()
@@ -166,14 +161,12 @@ class Crate(object):
 
     def iter_srcs(self):
         g = "{crate}/**/*.rs".format(crate=self.filename[:-len(".tar.gz")])
-        for rsrc in glob.iglob(g):
-            yield rsrc
+        yield from glob.iglob(g)
 
     def iter_lines(self):
         for src in self.iter_srcs():
             with open(src) as f:
-                for line in f:
-                    yield line
+                yield from f
 
 
 if __name__ == "__main__":
